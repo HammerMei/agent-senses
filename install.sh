@@ -37,5 +37,17 @@ else
     echo "  ✗ codex not found — install with: npm install -g @openai/codex"
 fi
 
+if command -v yt-dlp &>/dev/null; then
+    echo "  ✓ yt-dlp found: $(which yt-dlp)"
+else
+    echo "  ✗ yt-dlp not found — install with: pipx install yt-dlp"
+fi
+
+if command -v ffmpeg &>/dev/null; then
+    echo "  ✓ ffmpeg found: $(which ffmpeg)"
+else
+    echo "  ✗ ffmpeg not found — install with: brew install ffmpeg"
+fi
+
 echo ""
 echo "Done! Restart your Claude Code session to load the new skills."

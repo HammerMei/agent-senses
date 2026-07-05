@@ -9,9 +9,9 @@ Agents without native multimodal support can delegate perception tasks to capabl
 | Skill | Description | Status |
 |-------|-------------|--------|
 | [`see`](see/) | Analyze images and PDFs — answer questions, compare, extract text | ✅ Ready |
+| [`watch`](watch/) | Fetch a YouTube video's transcript, metadata, and keyframes | ✅ Ready |
 | `listen` | Transcribe audio | 🔜 Planned |
 | `read` | Extract and summarize documents | 🔜 Planned |
-| `watch` | Analyze video | 🔜 Planned |
 
 ## Install
 
@@ -25,7 +25,9 @@ Restart your Claude Code session after installing.
 
 ### Dependencies
 
-- [`codex`](https://github.com/openai/codex) CLI — `npm install -g @openai/codex`
+- [`codex`](https://github.com/openai/codex) CLI — `npm install -g @openai/codex` (for `see`)
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — `pipx install yt-dlp` (for `watch`)
+- `ffmpeg` — `brew install ffmpeg` (for `watch`)
 
 ## Usage
 
@@ -54,6 +56,18 @@ Returns structured JSON:
 ```
 
 Always check `error` first — `null` means success.
+
+### watch
+
+```bash
+# Transcript + metadata + 5 keyframes
+watch -u "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Transcript only, no frames
+watch -u "https://www.youtube.com/watch?v=VIDEO_ID" --no-frames
+```
+
+Returns structured JSON with `title`, `channel`, `duration_seconds`, `description`, `chapters`, `transcript`, `transcript_source`, and `frames` (paths only — this skill does not analyze frames itself; pass them to `see` or a native-vision model).
 
 ## Design
 
