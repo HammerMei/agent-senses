@@ -174,7 +174,19 @@ def _extract_audio(url: str, work_dir: Path, timeout: int) -> tuple[Path | None,
     return audio_files[0], None
 
 
-def _whisper_transcribe(audio_path: Path, timeout: int) -> tuple[str, str]:
+def _mw_transcribe(audio_path: Path, timeout: int) -> tuple[str, str]:
+    """Local, on-device transcription via MacWhisper's `mw` CLI — audio never leaves the machine.
+    Slower / heavier on CPU than a cloud call, but no API key and no privacy tradeoff."""
+    if not _check_binary("mw"):
+        return "", ""
+    proc = _run(["mw", "transcribe", str(audio_path)], timeout)
+    text = proc.stdout.strip()
+    if proc.returncode == 0 and text:
+        return text, "mw-local"
+    return "", ""
+
+
+def _cloud_whisper_transcribe(audio_path: Path, timeout: int) -> tuple[str, str]:
     """Try Groq Whisper first (cheaper/faster), then OpenAI Whisper. Returns (text, source)."""
     attempts = (
         ("GROQ_API_KEY", "https://api.groq.com/openai/v1/audio/transcriptions", "whisper-large-v3-turbo", "whisper-groq"),
@@ -198,6 +210,15 @@ def _whisper_transcribe(audio_path: Path, timeout: int) -> tuple[str, str]:
         if proc.returncode == 0 and text and "error" not in text[:20].lower():
             return text, source
     return "", ""
+
+
+def _whisper_transcribe(audio_path: Path, timeout: int) -> tuple[str, str]:
+    """Local MacWhisper (`mw`) first — privacy-preserving, audio stays on-device — then cloud
+    Groq/OpenAI Whisper as fallback if `mw` isn't installed or fails. Returns (text, source)."""
+    text, source = _mw_transcribe(audio_path, timeout)
+    if text:
+        return text, source
+    return _cloud_whisper_transcribe(audio_path, timeout)
 
 
 # ─── Frames ─────────────────────────────────────────────────────────────────
@@ -328,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
                     response.transcript, response.transcript_source = whisper_text, whisper_source
                 else:
                     response.error = _err(
-                        "no GROQ_API_KEY/OPENAI_API_KEY set, or both Whisper calls failed",
+                        "mw not installed and no GROQ_API_KEY/OPENAI_API_KEY set, or all transcription attempts failed",
                         "whisper_unavailable",
                     )
             else:

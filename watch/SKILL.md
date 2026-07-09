@@ -56,7 +56,13 @@ Requesting `-n 10` frames doesn't guarantee 10 back. By default, `watch` fingerp
 
 ### Whisper fallback
 
-If a video has no manual or auto captions, `transcript_source` is normally `"none"` and `watch` gives up — reading the transcript is cheap, calling a paid transcription API is not, so this never happens silently. Pass `--whisper-fallback` to opt in: it downloads just the audio track (not the full video) and transcribes it via Groq Whisper (`GROQ_API_KEY`, tried first — cheaper/faster) or OpenAI Whisper (`OPENAI_API_KEY`, fallback). If neither key is set, or both calls fail, it degrades back to `transcript_source: "none"` with `error.type: "whisper_unavailable"` — same graceful-degradation contract as the rest of this skill.
+If a video has no manual or auto captions, `transcript_source` is normally `"none"` and `watch` gives up — reading the transcript is cheap, transcription is not (in time, money, or privacy), so this never happens silently. Pass `--whisper-fallback` to opt in: it downloads just the audio track (not the full video) and transcribes it, trying each option in order:
+
+1. **`mw` (MacWhisper CLI)** — local, on-device, audio never leaves the machine. No API key, no cost, but slower and heavier on CPU/RAM than a cloud call. Requires the MacWhisper app installed and running (`mw` talks to it over a local socket). `transcript_source: "mw-local"`.
+2. **Groq Whisper** (`GROQ_API_KEY`) — cloud, cheaper/faster than OpenAI. `transcript_source: "whisper-groq"`.
+3. **OpenAI Whisper** (`OPENAI_API_KEY`) — cloud fallback. `transcript_source: "whisper-openai"`.
+
+If `mw` isn't installed and neither cloud key is set, or all attempts fail, it degrades back to `transcript_source: "none"` with `error.type: "whisper_unavailable"` — same graceful-degradation contract as the rest of this skill. If privacy matters for the content in question, verify `transcript_source` came back `"mw-local"` before assuming nothing left the machine.
 
 ## Output contract
 
@@ -72,7 +78,7 @@ Always returns JSON. Check `error` first.
 | `description` | string | Full video description |
 | `chapters` | array | `[{title, start_time}]` if the video has chapters, else `[]` |
 | `transcript` | string | Cleaned transcript text |
-| `transcript_source` | string | `"manual"`, `"auto"`, `"whisper-groq"`, `"whisper-openai"`, or `"none"` |
+| `transcript_source` | string | `"manual"`, `"auto"`, `"mw-local"`, `"whisper-groq"`, `"whisper-openai"`, or `"none"` |
 | `frames` | array | `[{id, timestamp_seconds, path}]` — empty if `--no-frames` or extraction failed |
 | `frames_deduplicated` | int | Count of near-identical frames dropped (0 if `--no-dedup` or nothing was dropped) |
 
@@ -86,7 +92,7 @@ Always returns JSON. Check `error` first.
 | `stream_resolve_failed` | Could not resolve a direct stream URL for frame extraction | Transcript/metadata may still be usable; frames unavailable |
 | `frame_extraction_failed` | Stream resolved but `ffmpeg` produced no frames | Retry with `-n` fewer frames or check network access |
 | `audio_extraction_failed` | `--whisper-fallback` passed but `yt-dlp` couldn't extract audio | Check the URL is valid; transcript stays `"none"` |
-| `whisper_unavailable` | `--whisper-fallback` passed but no `GROQ_API_KEY`/`OPENAI_API_KEY` set, or both calls failed | Set an API key and retry, or accept `transcript_source: "none"` |
+| `whisper_unavailable` | `--whisper-fallback` passed but `mw` isn't installed and no `GROQ_API_KEY`/`OPENAI_API_KEY` set, or all attempts failed | Install MacWhisper, or set an API key, and retry — or accept `transcript_source: "none"` |
 | `timeout` | A step exceeded the configured timeout | Retry with `--timeout` increased |
 
 Note: `error` may be set even when `transcript`/`metadata` fields are populated — this skill degrades gracefully (e.g. frame extraction can fail while transcript still succeeds). Always check which fields actually got data.

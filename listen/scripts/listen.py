@@ -79,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         response["transcript"], response["transcript_source"] = text, source
     else:
         response["error"] = _err(
-            "no GROQ_API_KEY/OPENAI_API_KEY set, or both Whisper calls failed", "whisper_unavailable"
+            "mw not installed and no GROQ_API_KEY/OPENAI_API_KEY set, or all transcription attempts failed",
+            "whisper_unavailable",
         )
         print(json.dumps(response, ensure_ascii=False, indent=2))
         return 1
