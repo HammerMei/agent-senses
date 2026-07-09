@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -42,8 +43,9 @@ class WatchResponse:
     description: str = ""
     chapters: list[dict[str, Any]] = field(default_factory=list)
     transcript: str = ""
-    transcript_source: str = "none"  # "manual" | "auto" | "none"
+    transcript_source: str = "none"  # "manual" | "auto" | "whisper-groq" | "whisper-openai" | "none"
     frames: list[dict[str, Any]] = field(default_factory=list)
+    frames_deduplicated: int = 0
     video_url: str = ""
     error: dict[str, Any] | None = None
 
@@ -59,6 +61,7 @@ class WatchResponse:
             "transcript": self.transcript,
             "transcript_source": self.transcript_source,
             "frames": self.frames,
+            "frames_deduplicated": self.frames_deduplicated,
             "error": self.error,
         }
 
@@ -71,6 +74,11 @@ def _run(cmd: list[str], timeout: int, input_text: str | None = None) -> subproc
     return subprocess.run(
         cmd, input=input_text, text=True, capture_output=True, timeout=timeout, check=False
     )
+
+
+def _run_bytes(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Like _run but for commands whose stdout is binary (e.g. raw pixel data)."""
+    return subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
 
 
 def _check_binary(name: str) -> bool:
@@ -150,6 +158,48 @@ def _fetch_transcript(url: str, work_dir: Path, timeout: int) -> tuple[str, str]
     return "", "none"
 
 
+def _extract_audio(url: str, work_dir: Path, timeout: int) -> tuple[Path | None, str | None]:
+    """Download just the audio track (small, mp3) for Whisper fallback."""
+    out_template = str(work_dir / "audio.%(ext)s")
+    proc = _run(
+        [
+            "yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "5",
+            "--no-warnings", "-o", out_template, url,
+        ],
+        timeout,
+    )
+    audio_files = list(work_dir.glob("audio.*"))
+    if proc.returncode != 0 or not audio_files:
+        return None, proc.stderr.strip() or "yt-dlp produced no audio file"
+    return audio_files[0], None
+
+
+def _whisper_transcribe(audio_path: Path, timeout: int) -> tuple[str, str]:
+    """Try Groq Whisper first (cheaper/faster), then OpenAI Whisper. Returns (text, source)."""
+    attempts = (
+        ("GROQ_API_KEY", "https://api.groq.com/openai/v1/audio/transcriptions", "whisper-large-v3-turbo", "whisper-groq"),
+        ("OPENAI_API_KEY", "https://api.openai.com/v1/audio/transcriptions", "whisper-1", "whisper-openai"),
+    )
+    for env_var, endpoint, model, source in attempts:
+        api_key = os.environ.get(env_var)
+        if not api_key:
+            continue
+        proc = _run(
+            [
+                "curl", "-s", endpoint,
+                "-H", f"Authorization: Bearer {api_key}",
+                "-F", f"file=@{audio_path}",
+                "-F", f"model={model}",
+                "-F", "response_format=text",
+            ],
+            timeout,
+        )
+        text = proc.stdout.strip()
+        if proc.returncode == 0 and text and "error" not in text[:20].lower():
+            return text, source
+    return "", ""
+
+
 # ─── Frames ─────────────────────────────────────────────────────────────────
 
 def _resolve_stream_url(url: str, timeout: int) -> tuple[str | None, str | None]:
@@ -184,6 +234,43 @@ def _extract_frames(
     return frames
 
 
+def _frame_fingerprint(frame_path: Path, timeout: int) -> bytes | None:
+    """8x8 grayscale raw pixels — cheap perceptual fingerprint, no extra deps beyond ffmpeg."""
+    proc = _run_bytes(
+        ["ffmpeg", "-y", "-i", str(frame_path), "-vf", "scale=8:8,format=gray", "-f", "rawvideo", "-"],
+        timeout,
+    )
+    if proc.returncode != 0 or len(proc.stdout) < 64:
+        return None
+    return proc.stdout[:64]
+
+
+def _hamming_distance(a: bytes, b: bytes) -> int:
+    """Average-hash style distance: threshold each fingerprint against its own mean, then compare bits."""
+    def bits(data: bytes) -> list[int]:
+        mean = sum(data) / len(data)
+        return [1 if v > mean else 0 for v in data]
+    return sum(1 for x, y in zip(bits(a), bits(b)) if x != y)
+
+
+def _dedupe_frames(
+    frames: list[dict[str, Any]], timeout: int, threshold: int = 5
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop frames that are near-identical to the previously *kept* frame (e.g. static/paused footage)."""
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    prev_fp: bytes | None = None
+    for f in frames:
+        fp = _frame_fingerprint(Path(f["path"]), timeout)
+        if fp is not None and prev_fp is not None and _hamming_distance(fp, prev_fp) <= threshold:
+            dropped += 1
+            continue
+        kept.append(f)
+        if fp is not None:
+            prev_fp = fp
+    return kept, dropped
+
+
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 def _make_parser() -> argparse.ArgumentParser:
@@ -192,6 +279,14 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("-n", "--num-frames", type=int, default=DEFAULT_NUM_FRAMES, help="Number of keyframes to extract")
     parser.add_argument("-o", "--output-dir", default=None, help="Directory to save frames (default: temp dir)")
     parser.add_argument("--no-frames", action="store_true", help="Skip frame extraction (transcript + metadata only)")
+    parser.add_argument(
+        "--whisper-fallback", action="store_true",
+        help="If no captions exist, fall back to Whisper transcription (GROQ_API_KEY or OPENAI_API_KEY required). Costs money/time — opt-in only.",
+    )
+    parser.add_argument(
+        "--no-dedup", action="store_true",
+        help="Keep near-identical frames (e.g. static footage) instead of dropping them. Dedup runs by default — it's local/free (ffmpeg only), unlike --whisper-fallback.",
+    )
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per-step timeout in seconds")
     return parser
 
@@ -225,6 +320,20 @@ def main(argv: list[str] | None = None) -> int:
 
         response.transcript, response.transcript_source = _fetch_transcript(args.url, out_dir, args.timeout)
 
+        if response.transcript_source == "none" and args.whisper_fallback:
+            audio_path, audio_err = _extract_audio(args.url, out_dir, args.timeout)
+            if audio_path is not None:
+                whisper_text, whisper_source = _whisper_transcribe(audio_path, args.timeout)
+                if whisper_text:
+                    response.transcript, response.transcript_source = whisper_text, whisper_source
+                else:
+                    response.error = _err(
+                        "no GROQ_API_KEY/OPENAI_API_KEY set, or both Whisper calls failed",
+                        "whisper_unavailable",
+                    )
+            else:
+                response.error = _err(audio_err or "audio extraction failed", "audio_extraction_failed")
+
         if not args.no_frames:
             stream_url, stream_err = _resolve_stream_url(args.url, args.timeout)
             if stream_url:
@@ -233,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not response.frames:
                     response.error = _err("frame extraction produced no output", "frame_extraction_failed")
+                elif not args.no_dedup:
+                    response.frames, response.frames_deduplicated = _dedupe_frames(response.frames, args.timeout)
             else:
                 response.error = _err(stream_err or "could not resolve stream URL", "stream_resolve_failed")
 
