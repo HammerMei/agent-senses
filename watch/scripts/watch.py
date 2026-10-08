@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ from typing import Any
 DEFAULT_TIMEOUT = 120
 DEFAULT_NUM_FRAMES = 5
 DEFAULT_FRAME_HEIGHT = 480
+SUBTITLE_RETRIES = 2  # extra attempts after an HTTP 429 from YouTube
+SUBTITLE_RETRY_WAIT_SECONDS = 30
 
 
 @dataclass
@@ -139,23 +142,44 @@ def _clean_vtt(vtt_text: str) -> str:
     return " ".join(out)
 
 
-def _fetch_transcript(url: str, work_dir: Path, timeout: int) -> tuple[str, str]:
-    """Try manual subs first, then auto-generated. Returns (transcript, source)."""
+def _fetch_transcript(url: str, work_dir: Path, timeout: int) -> tuple[str, str, dict[str, Any] | None]:
+    """Try manual subs first, then auto-generated. Returns (transcript, source, error).
+
+    `error` is None when yt-dlp ran cleanly, so `source == "none"` then really
+    means the video has no English subtitles. A non-zero yt-dlp exit is a
+    fetch failure, not "no subtitles", and is reported with yt-dlp's own
+    message. HTTP 429 means the subtitles may exist but YouTube is rate
+    limiting us, so wait and retry instead of hammering it.
+    """
     out_template = str(work_dir / "sub.%(ext)s")
+    first_error: dict[str, Any] | None = None
     for flag, source in (("--write-sub", "manual"), ("--write-auto-sub", "auto")):
-        proc = _run(
-            [
-                "yt-dlp", "--skip-download", flag, "--sub-lang", "en",
-                "--sub-format", "vtt", "--no-warnings", "-o", out_template, url,
-            ],
-            timeout,
-        )
+        for attempt in range(SUBTITLE_RETRIES + 1):
+            proc = _run(
+                [
+                    "yt-dlp", "--skip-download", flag, "--sub-lang", "en",
+                    "--sub-format", "vtt", "--no-warnings", "-o", out_template, url,
+                ],
+                timeout,
+            )
+            if proc.returncode == 0:
+                break
+            message = proc.stderr.strip() or f"yt-dlp exited with code {proc.returncode}"
+            if "HTTP Error 429" in message:
+                if attempt < SUBTITLE_RETRIES:
+                    time.sleep(SUBTITLE_RETRY_WAIT_SECONDS)
+                    continue
+                err_type = "subtitle_rate_limited"
+            else:
+                err_type = "subtitle_fetch_failed"
+            first_error = first_error or _err(message, err_type)
+            break
         vtt_files = list(work_dir.glob("sub*.vtt"))
         if proc.returncode == 0 and vtt_files:
             text = _clean_vtt(vtt_files[0].read_text(errors="replace"))
             if text:
-                return text, source
-    return "", "none"
+                return text, source, None
+    return "", "none", first_error
 
 
 def _extract_audio(url: str, work_dir: Path, timeout: int) -> tuple[Path | None, str | None]:
@@ -339,7 +363,9 @@ def main(argv: list[str] | None = None) -> int:
         out_dir = Path(args.output_dir) if args.output_dir else Path(tempfile.mkdtemp(prefix="watch_"))
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        response.transcript, response.transcript_source = _fetch_transcript(args.url, out_dir, args.timeout)
+        response.transcript, response.transcript_source, response.error = _fetch_transcript(
+            args.url, out_dir, args.timeout
+        )
 
         if response.transcript_source == "none" and args.whisper_fallback:
             audio_path, audio_err = _extract_audio(args.url, out_dir, args.timeout)
@@ -347,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
                 whisper_text, whisper_source = _whisper_transcribe(audio_path, args.timeout)
                 if whisper_text:
                     response.transcript, response.transcript_source = whisper_text, whisper_source
+                    response.error = None
                 else:
                     response.error = _err(
                         "mw not installed and no GROQ_API_KEY/OPENAI_API_KEY set, or all transcription attempts failed",

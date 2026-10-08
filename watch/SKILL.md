@@ -29,6 +29,7 @@ This keeps `watch` cheap and fast for the common case (transcript alone is usual
 
 - Read the transcript before speculating about video content — do not guess from the title/thumbnail alone
 - If `transcript_source` is `"none"`, say so explicitly; do not fabricate a summary from metadata alone
+- `"none"` with `error: null` means the video has no English subtitles. `"none"` with `error.type` `subtitle_rate_limited` or `subtitle_fetch_failed` means the fetch failed, so subtitles may exist; report the original message and do not say the video has no subtitles
 - If `error` is set, check `error.type` before treating any other field as reliable
 
 ## CLI
@@ -93,6 +94,8 @@ Always returns JSON. Check `error` first.
 | `frame_extraction_failed` | Stream resolved but `ffmpeg` produced no frames | Retry with `-n` fewer frames or check network access |
 | `audio_extraction_failed` | `--whisper-fallback` passed but `yt-dlp` couldn't extract audio | Check the URL is valid; transcript stays `"none"` |
 | `whisper_unavailable` | `--whisper-fallback` passed but `mw` isn't installed and no `GROQ_API_KEY`/`OPENAI_API_KEY` set, or all attempts failed | Install MacWhisper, or set an API key, and retry — or accept `transcript_source: "none"` |
+| `subtitle_rate_limited` | yt-dlp got HTTP 429 fetching subtitles, even after waiting and retrying (2 retries, 30s apart). Subtitles may exist | Wait a while (minutes) and run again; do not retry in a tight loop |
+| `subtitle_fetch_failed` | yt-dlp exited non-zero fetching subtitles for another reason (e.g. 403); `error.message` is yt-dlp's own message | Read the message; this is not the same as "no subtitles" |
 | `timeout` | A step exceeded the configured timeout | Retry with `--timeout` increased |
 
 Note: `error` may be set even when `transcript`/`metadata` fields are populated — this skill degrades gracefully (e.g. frame extraction can fail while transcript still succeeds). Always check which fields actually got data.
