@@ -44,12 +44,12 @@ class FetchTranscriptTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_clean_run_without_subs_is_none_without_error(self):
-        (text, source, err), _ = self.run_with([(proc(), None), (proc(), None)])
+        (text, source, err), _ = self.run_with([(proc(), None), (proc(), None), (proc(), None)])
         self.assertEqual((text, source, err), ("", "none", None))
 
     def test_failure_is_reported_not_called_no_subtitles(self):
         msg = "ERROR: HTTP Error 403: Forbidden"
-        (text, source, err), _ = self.run_with([(proc(1, msg), None), (proc(1, msg), None)])
+        (text, source, err), _ = self.run_with([(proc(1, msg), None)] * 3)
         self.assertEqual(source, "none")
         self.assertEqual(err["type"], "subtitle_fetch_failed")
         self.assertIn("403", err["message"])
@@ -63,12 +63,18 @@ class FetchTranscriptTest(unittest.TestCase):
 
     def test_429_exhausted_reports_rate_limited_with_original_message(self):
         msg = "ERROR: Unable to download video subtitles: HTTP Error 429: Too Many Requests"
-        n = (watch.SUBTITLE_RETRIES + 1) * 2  # manual + auto, each retried
+        n = (watch.SUBTITLE_RETRIES + 1) * 3  # manual + en-orig + en, each retried
         (text, source, err), run = self.run_with([(proc(1, msg), None)] * n)
         self.assertEqual(source, "none")
         self.assertEqual(err["type"], "subtitle_rate_limited")
         self.assertEqual(err["message"], msg)
         self.assertEqual(run.call_count, n)
+
+    def test_prefers_en_orig_and_skips_translated_en_track(self):
+        (text, source, err), run = self.run_with([(proc(), None), (proc(), VTT)])
+        self.assertEqual((text, source, err), ("hello world", "auto", None))
+        langs = [c.args[0][c.args[0].index("--sub-lang") + 1] for c in run.call_args_list]
+        self.assertEqual(langs, ["en", "en-orig"])
 
     def test_manual_fails_but_auto_succeeds_returns_transcript_without_error(self):
         (text, source, err), _ = self.run_with([(proc(1, "ERROR: boom"), None), (proc(), VTT)])

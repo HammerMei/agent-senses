@@ -153,11 +153,18 @@ def _fetch_transcript(url: str, work_dir: Path, timeout: int) -> tuple[str, str,
     """
     out_template = str(work_dir / "sub.%(ext)s")
     first_error: dict[str, Any] | None = None
-    for flag, source in (("--write-sub", "manual"), ("--write-auto-sub", "auto")):
+    # "en-orig" is YouTube's original-language auto caption. Plain "en" can be
+    # a machine translation of another-language track, which YouTube rate
+    # limits (HTTP 429) far more aggressively, so try en-orig first.
+    for flag, lang, source in (
+        ("--write-sub", "en", "manual"),
+        ("--write-auto-sub", "en-orig", "auto"),
+        ("--write-auto-sub", "en", "auto"),
+    ):
         for attempt in range(SUBTITLE_RETRIES + 1):
             proc = _run(
                 [
-                    "yt-dlp", "--skip-download", flag, "--sub-lang", "en",
+                    "yt-dlp", "--skip-download", flag, "--sub-lang", lang,
                     "--sub-format", "vtt", "--no-warnings", "-o", out_template, url,
                 ],
                 timeout,
