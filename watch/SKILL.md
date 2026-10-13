@@ -29,7 +29,8 @@ This keeps `watch` cheap and fast for the common case (transcript alone is usual
 
 - Read the transcript before speculating about video content — do not guess from the title/thumbnail alone
 - If `transcript_source` is `"none"`, say so explicitly; do not fabricate a summary from metadata alone
-- `"none"` with `error: null` means the video has no English subtitles. `"none"` with `error.type` `subtitle_rate_limited` or `subtitle_fetch_failed` means the fetch failed, so subtitles may exist; report the original message and do not say the video has no subtitles
+- English tracks are tried first; if the video has none, its own original-language track (the uploader's manual subtitles, then an original-language auto caption) is used, and `transcript_language` says which one. Machine-translated tracks are never used as a fallback. Check `transcript_language` before assuming the transcript is English
+- `"none"` with `error: null` means no subtitle track yielded text. `"none"` with `error.type` `subtitle_rate_limited` or `subtitle_fetch_failed` means the fetch failed, so subtitles may exist; report the original message and do not say the video has no subtitles
 - If `error` is set, check `error.type` before treating any other field as reliable
 
 ## CLI
@@ -80,6 +81,7 @@ Always returns JSON. Check `error` first.
 | `chapters` | array | `[{title, start_time}]` if the video has chapters, else `[]` |
 | `transcript` | string | Cleaned transcript text |
 | `transcript_source` | string | `"manual"`, `"auto"`, `"mw-local"`, `"whisper-groq"`, `"whisper-openai"`, or `"none"` |
+| `transcript_language` | string | Language of the subtitle track that was used (e.g. `"en"`, `"en-orig"`, `"zh-TW"`); `""` when `transcript_source` is `"none"` or a Whisper source |
 | `frames` | array | `[{id, timestamp_seconds, path}]` — empty if `--no-frames` or extraction failed |
 | `frames_deduplicated` | int | Count of near-identical frames dropped (0 if `--no-dedup` or nothing was dropped) |
 

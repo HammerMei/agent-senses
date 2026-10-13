@@ -47,6 +47,7 @@ class WatchResponse:
     chapters: list[dict[str, Any]] = field(default_factory=list)
     transcript: str = ""
     transcript_source: str = "none"  # "manual" | "auto" | "whisper-groq" | "whisper-openai" | "none"
+    transcript_language: str = ""  # subtitle track language (e.g. "en", "zh-TW"); "" when unknown
     frames: list[dict[str, Any]] = field(default_factory=list)
     frames_deduplicated: int = 0
     video_url: str = ""
@@ -63,6 +64,7 @@ class WatchResponse:
             "chapters": self.chapters,
             "transcript": self.transcript,
             "transcript_source": self.transcript_source,
+            "transcript_language": self.transcript_language,
             "frames": self.frames,
             "frames_deduplicated": self.frames_deduplicated,
             "error": self.error,
@@ -142,25 +144,57 @@ def _clean_vtt(vtt_text: str) -> str:
     return " ".join(out)
 
 
-def _fetch_transcript(url: str, work_dir: Path, timeout: int) -> tuple[str, str, dict[str, Any] | None]:
-    """Try manual subs first, then auto-generated. Returns (transcript, source, error).
+def _fallback_tracks(meta: dict[str, Any] | None) -> list[tuple[str, str, str]]:
+    """Non-English tracks to try when no English subtitles exist.
+
+    Order: the uploader's own manual tracks, then original-language auto
+    captions ("xx-orig"), then the video's declared language. Machine
+    translations (e.g. "ab-zh-TW") are never listed in `subtitles` and are not
+    "-orig" keys, so they are not picked up here.
+    """
+    if not meta:
+        return []
+    manual = meta.get("subtitles") or {}
+    auto = meta.get("automatic_captions") or {}
+    tracks: list[tuple[str, str, str]] = []
+    tracks += [("--write-sub", lang, "manual") for lang in manual if not lang.startswith("en")]
+    tracks += [
+        ("--write-auto-sub", lang, "auto")
+        for lang in auto
+        if lang.endswith("-orig") and not lang.startswith("en")
+    ]
+    declared = meta.get("language")
+    if declared and not declared.startswith("en") and declared in auto:
+        tracks.append(("--write-auto-sub", declared, "auto"))
+    return tracks
+
+
+def _fetch_transcript(
+    url: str, work_dir: Path, timeout: int, meta: dict[str, Any] | None = None
+) -> tuple[str, str, str, dict[str, Any] | None]:
+    """Fetch subtitles. Returns (transcript, source, language, error).
+
+    English is tried first (manual, then auto). If the video has no English
+    subtitles, the uploader's original-language track is tried next, so a
+    non-English video is not reported as having no subtitles.
 
     `error` is None when yt-dlp ran cleanly, so `source == "none"` then really
-    means the video has no English subtitles. A non-zero yt-dlp exit is a
-    fetch failure, not "no subtitles", and is reported with yt-dlp's own
-    message. HTTP 429 means the subtitles may exist but YouTube is rate
-    limiting us, so wait and retry instead of hammering it.
+    means no subtitle track yielded text. A non-zero yt-dlp exit is a fetch
+    failure, not "no subtitles", and is reported with yt-dlp's own message.
+    HTTP 429 means the subtitles may exist but YouTube is rate limiting us, so
+    wait and retry instead of hammering it.
     """
     out_template = str(work_dir / "sub.%(ext)s")
     first_error: dict[str, Any] | None = None
     # "en-orig" is YouTube's original-language auto caption. Plain "en" can be
     # a machine translation of another-language track, which YouTube rate
     # limits (HTTP 429) far more aggressively, so try en-orig first.
-    for flag, lang, source in (
+    tracks = [
         ("--write-sub", "en", "manual"),
         ("--write-auto-sub", "en-orig", "auto"),
         ("--write-auto-sub", "en", "auto"),
-    ):
+    ] + _fallback_tracks(meta)
+    for flag, lang, source in tracks:
         for attempt in range(SUBTITLE_RETRIES + 1):
             proc = _run(
                 [
@@ -181,12 +215,12 @@ def _fetch_transcript(url: str, work_dir: Path, timeout: int) -> tuple[str, str,
                 err_type = "subtitle_fetch_failed"
             first_error = first_error or _err(message, err_type)
             break
-        vtt_files = list(work_dir.glob("sub*.vtt"))
-        if proc.returncode == 0 and vtt_files:
-            text = _clean_vtt(vtt_files[0].read_text(errors="replace"))
+        vtt_file = work_dir / f"sub.{lang}.vtt"
+        if proc.returncode == 0 and vtt_file.exists():
+            text = _clean_vtt(vtt_file.read_text(errors="replace"))
             if text:
-                return text, source, None
-    return "", "none", first_error
+                return text, source, lang, None
+    return "", "none", "", first_error
 
 
 def _extract_audio(url: str, work_dir: Path, timeout: int) -> tuple[Path | None, str | None]:
@@ -370,9 +404,12 @@ def main(argv: list[str] | None = None) -> int:
         out_dir = Path(args.output_dir) if args.output_dir else Path(tempfile.mkdtemp(prefix="watch_"))
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        response.transcript, response.transcript_source, response.error = _fetch_transcript(
-            args.url, out_dir, args.timeout
-        )
+        (
+            response.transcript,
+            response.transcript_source,
+            response.transcript_language,
+            response.error,
+        ) = _fetch_transcript(args.url, out_dir, args.timeout, meta)
 
         if response.transcript_source == "none" and args.whisper_fallback:
             audio_path, audio_err = _extract_audio(args.url, out_dir, args.timeout)
